@@ -95,6 +95,10 @@ export interface AcpSupport {
   images?: boolean;
   /** Message shown when the CLI is present but not signed in. */
   loginNote: string;
+  /** The ACP provider reliably asks before native execute/edit calls, so the
+   * core can deny those calls for coordination-only roles while retaining MCP
+   * peer/hive tools. */
+  coordinationOnlyNativeTools?: boolean;
   /** How a user installs this harness's CLI; surfaced by the setup UI. */
   install?: EngineInstall;
   /** CLI argv AFTER the binary name to enter ACP stdio mode. */
@@ -418,9 +422,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // Antigravity yolo setting would silently outrank the selector. Calls
         // that omit approvalMode retain the old adapter-level behavior for
         // embedders and tests outside the harness.
-        const turnConfig = turn.approvalMode === undefined
-          ? config
-          : { ...config, fullAuto: turn.approvalMode === "full" && supportsApprovalMode(DRIVER_KIND, "full") };
+        const turnConfig = turn.coordinationOnly === true
+          ? { ...config, fullAuto: false }
+          : turn.approvalMode === undefined
+            ? config
+            : { ...config, fullAuto: turn.approvalMode === "full" && supportsApprovalMode(DRIVER_KIND, "full") };
         const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
         if (controlsHost && turnConfig.fullAuto && turn.approvalMode !== "full") {
           throw new Error("local computer control requires interactive provider approvals");
@@ -560,6 +566,9 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               });
               return;
             }
+            if (turn.coordinationOnly) {
+              throw new Error("ACP file writes are disabled for coordination-only turns.");
+            }
             if (typeof params.content !== "string" || Buffer.byteLength(params.content) > CLIENT_FILE_MAX_BYTES) {
               throw new Error(`ACP can only write text files under ${CLIENT_FILE_MAX_BYTES} bytes.`);
             }
@@ -633,6 +642,14 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           }
           const kind = String(toolCall.kind ?? "");
           const tool = kind === "execute" ? "shell" : kind === "edit" ? "edit" : kind || "tool";
+          if (turn.coordinationOnly && (kind === "execute" || kind === "edit")) {
+            const reject = optionFor("reject");
+            if (!reject) {
+              missing("reject");
+              return send({ jsonrpc: "2.0", id: msg.id, result: cancelled });
+            }
+            return send({ jsonrpc: "2.0", id: msg.id, result: { outcome: { outcome: "selected", optionId: reject } } });
+          }
           const summary = String(toolCall.rawInput?.command ?? toolCall.title ?? tool).slice(0, 200);
           const requestId = newId();
           const finish = (
@@ -1024,6 +1041,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           capabilities: {
             sessionModelSwitch: "unsupported",
             agentsMcp: true,
+            coordinationOnlyNativeTools: support.coordinationOnlyNativeTools === true,
         customMcp: true,
             computerMcp: true,
             composioMcp: true,

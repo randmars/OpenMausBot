@@ -729,9 +729,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         "--permission-mode", permissionMode,
       ];
       if (config.tools !== undefined) args.push("--tools", config.tools.join(","));
-      if (config.disallowedTools?.length) {
-        args.push("--disallowedTools", config.disallowedTools.join(","));
+      const disallowedTools = new Set(config.disallowedTools ?? []);
+      if (turn.coordinationOnly) {
+        // Claude is the only verified native restriction today. Keep this
+        // list explicit and narrow: coordination remains available, while
+        // the built-ins that can modify a worktree are unavailable.
+        for (const tool of ["Bash", "Edit", "Write", "NotebookEdit"]) disallowedTools.add(tool);
       }
+      if (disallowedTools.size) args.push("--disallowedTools", [...disallowedTools].join(","));
       const turnEnvironment: NodeJS.ProcessEnv = { ...process.env, ...input.environment };
       const turnModel = await resolveClaudeTurnModel(turn.model, turnEnvironment);
       const injected = applyClaudeInject({ ...turnEnvironment }, turnModel);
@@ -1377,6 +1382,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         capabilities: {
           sessionModelSwitch: "in-session",
           agentsMcp: true,
+          coordinationOnlyNativeTools: true,
         customMcp: true,
           computerMcp: true,
           composioMcp: true,

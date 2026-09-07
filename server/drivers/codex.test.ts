@@ -212,6 +212,43 @@ describe("CodexDriver turns (fake app-server)", () => {
     },
   );
 
+  it("forces coordination-only turns into native read-only mode and denies a native file write", async () => {
+    await create({ mode: "coordination-write" });
+    const dump = join(scratch, "coordination-only.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    await instance.adapter.sendTurn({
+      threadId: "t-coordination-only",
+      text: "coordinate",
+      approvalMode: "full",
+      coordinationOnly: true,
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    const threadStart = seen.calls.find((call: { method: string }) => call.method === "thread/start");
+    const turnStart = seen.calls.find((call: { method: string }) => call.method === "turn/start");
+    expect(threadStart.params).toMatchObject({ approvalPolicy: "on-request", sandbox: "read-only" });
+    expect(turnStart.params).toMatchObject({ approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly" } });
+    expect(seen.decision).toEqual({ decision: "denied" });
+  });
+
+  it("auto-accepts an allowed MCP call without weakening native read-only mode", async () => {
+    await create({ mode: "mcp-elicitation" });
+    const dump = join(scratch, "coordination-mcp.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    await instance.adapter.sendTurn({
+      threadId: "t-coordination-mcp",
+      text: "list bots",
+      approvalMode: "full",
+      coordinationOnly: true,
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    expect(recorder.events.some((event) => event.type === "request.opened")).toBe(false);
+    expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ action: "accept", content: {} });
+  });
+
   it("reasserts the effective config.toml settings for Custom", async () => {
     await create({ mode: "resume", fullAuto: true });
     const dump = join(scratch, "custom.json");

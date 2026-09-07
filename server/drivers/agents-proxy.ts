@@ -38,6 +38,7 @@ const THREAD_ID = process.env.OMB_THREAD_ID ?? "";
 const TOKEN = process.env.OMB_COMMS_TOKEN ?? "";
 const DEPTH = Number(process.env.OMB_TURN_DEPTH ?? "0") || 0;
 const SKILL_AUTHORING_ENABLED = process.env.OMB_SKILL_AUTHORING_ENABLED === "1";
+const HIVE_TOOLS_ENABLED = process.env.OMB_HIVE_TOOLS_ENABLED === "1";
 const MAX_CREATED_PER_TURN = 4;
 let createdThisTurn = 0;
 // Same spirit as MAX_CREATED_PER_TURN above and MAX_QUEUED_PER_THREAD in
@@ -299,6 +300,42 @@ const TOOLS = [
     },
   },
   {
+    name: "hive_submit",
+    description:
+      "Submit one bounded Linear or Missive assignment to the organization's hive queue. Coordination roles only. The harness supplies the authenticated backend; never provide a URL, command, credential, or arbitrary destination.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source_type: { type: "string", enum: ["linear_issue", "missive_assignment"] },
+        source_id: { type: "string", minLength: 1, maxLength: 200 },
+        harness: { type: "string", enum: ["codex", "claude", "grok", "devin"] },
+      },
+      required: ["source_type", "source_id", "harness"],
+    },
+  },
+  {
+    name: "hive_status",
+    description: "Read the status of one Linear or Missive hive assignment. This is read-only and has no provider credentials.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        source_type: { type: "string", enum: ["linear_issue", "missive_assignment"] },
+        source_id: { type: "string", minLength: 1, maxLength: 200 },
+      },
+      required: ["source_type", "source_id"],
+    },
+  },
+  {
+    name: "hive_acceptance",
+    description: "Accept or reject this exact verified deliverable as its accountable domain/project owner. Inspect the source and evidence first. This never approves merge, deploy, sending or purchasing. Your identity is supplied by the harness.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      queue_id: { type: "string" }, generation: { type: "integer" }, run_id: { type: "string" }, worker_fence: { type: "string" },
+      source_revision: { type: "string" }, receipt_digest: { type: "string" }, accepted: { type: "boolean" }, summary: { type: "string" },
+    }, required: ["queue_id", "generation", "run_id", "worker_fence", "source_revision", "receipt_digest", "accepted", "summary"] },
+  },
+  {
     name: "post_to_room",
     description:
       "Put one message into a shared room you belong to, for example when the user asks you to tell the team something. Get group_id from list_rooms. This posts and returns: no room member's turn starts, nobody replies, and nothing comes back except confirmation — so never use it to ask a question or hand out work (use ask_bot or delegate_bot for those). Post once, say it in full, and tell the user what you posted. If a post is refused, do not retry it: say what you wanted to post in your reply instead.",
@@ -494,9 +531,11 @@ const TOOLS = [
 ];
 
 const SKILL_TOOL_NAMES = new Set(["skills_list", "skill_manage"]);
-const AVAILABLE_TOOLS = SKILL_AUTHORING_ENABLED
-  ? TOOLS
-  : TOOLS.filter((tool) => !SKILL_TOOL_NAMES.has(tool.name));
+const HIVE_TOOL_NAMES = new Set(["hive_submit", "hive_status", "hive_acceptance"]);
+const AVAILABLE_TOOLS = TOOLS.filter((tool) =>
+  (SKILL_AUTHORING_ENABLED || !SKILL_TOOL_NAMES.has(tool.name)) &&
+  (HIVE_TOOLS_ENABLED || !HIVE_TOOL_NAMES.has(tool.name))
+);
 
 type Json = Record<string, unknown>;
 type RoutineAction = "update" | "pause" | "resume" | "run_now" | "delete";
@@ -565,6 +604,38 @@ function recallSpeaker(hit: Json): string {
 }
 
 async function callTool(name: string, args: Json): Promise<{ text: string; isError?: boolean }> {
+  if (name === "hive_submit") {
+    const sourceType = String(args.source_type ?? "").trim();
+    const sourceId = String(args.source_id ?? "").trim();
+    const harness = String(args.harness ?? "").trim();
+    if (!/^(linear_issue|missive_assignment)$/.test(sourceType) || !/^[A-Za-z0-9_.:\/-]{1,200}$/.test(sourceId) ||
+      !/^(codex|claude|grok|devin)$/.test(harness)) {
+      return { text: "hive_submit needs a valid source_type, source_id, and harness.", isError: true };
+    }
+    const r = await api("/api/internal/hive-submit", {
+      method: "POST",
+      body: JSON.stringify({ sourceType, sourceId, harness }),
+    });
+    if (r.error) return { text: String(r.error), isError: true };
+    return { text: `Hive admission submitted for ${sourceType} ${sourceId}. ${JSON.stringify(r)}` };
+  }
+  if (name === "hive_status") {
+    const sourceType = String(args.source_type ?? "").trim();
+    const sourceId = String(args.source_id ?? "").trim();
+    if (!/^(linear_issue|missive_assignment)$/.test(sourceType) || !/^[A-Za-z0-9_.:\/-]{1,200}$/.test(sourceId)) {
+      return { text: "hive_status needs a valid source_type and source_id.", isError: true };
+    }
+    const query = new URLSearchParams({ sourceType, sourceId });
+    const r = await api(`/api/internal/hive-status?${query.toString()}`);
+    if (r.error) return { text: String(r.error), isError: true };
+    return { text: JSON.stringify(r) };
+  }
+  if (name === "hive_acceptance") {
+    const r = await api("/api/internal/hive-acceptance", { method: "POST", body: JSON.stringify({ queueId: args.queue_id,
+      generation: args.generation, runId: args.run_id, workerFence: args.worker_fence, sourceRevision: args.source_revision,
+      receiptDigest: args.receipt_digest, accepted: args.accepted, summary: args.summary }) });
+    return r.error ? { text: String(r.error), isError: true } : { text: JSON.stringify(r) };
+  }
   if (name === "list_bots") {
     const r = await api(`/api/internal/agents?self=${encodeURIComponent(BOT_ID)}`);
     const bots = (r.bots as Array<Json>) ?? [];

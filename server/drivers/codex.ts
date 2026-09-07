@@ -258,6 +258,23 @@ function namedApprovalParams(mode: Exclude<ApprovalMode, "custom">): CodexApprov
   };
 }
 
+/** Coordination-only turns retain MCP peer/hive access while Codex's native
+ * shell and file tools are held to the read-only sandbox. */
+function coordinationOnlyApprovalParams(): CodexApprovalParams {
+  return {
+    thread: {
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "read-only",
+    },
+    turn: {
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandboxPolicy: { type: "readOnly" },
+    },
+  };
+}
+
 function effectiveApprovalPolicy(value: unknown): unknown {
   if (value === "untrusted" || value === "on-request" || value === "never") return value;
   const granular = plainRecord(plainRecord(value)?.granular);
@@ -522,6 +539,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           throw new Error(`Custom MCP server “${name}” cannot set reserved environment variable “${reserved}”`);
         }
       }
+      // Full mode may auto-accept MCP permissions even for coordination-only
+      // turns. Native shell/edit permissions are still rejected below before
+      // this branch, so coordination retains its read-only native boundary
+      // while peer/hive MCP calls remain usable in background work.
       let autoAcceptPermissions = approvalMode === "full";
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
       const turnId = newId();
@@ -719,6 +740,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
             : isAdditionalPermission
               ? { permissions: allow ? grantedPermissions(params.permissions) : {}, scope: "turn" }
               : { decision: allow ? (legacy ? "approved" : "accept") : legacy ? "denied" : "decline" };
+        if (turn.coordinationOnly && !isMcpPermission && !isQuestion) {
+          send({ jsonrpc: "2.0", id: msg.id, result: permissionResult(false) });
+          return;
+        }
         if (autoAcceptPermissions && isPermission) {
           return send({
             jsonrpc: "2.0",
@@ -991,7 +1016,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         }
         const developerInstructions = codexDeveloperInstructions(effectiveConfig, turn.system ?? "");
         let approvalParams: CodexApprovalParams;
-        if (approvalMode === "custom") {
+        if (turn.coordinationOnly) {
+          approvalParams = coordinationOnlyApprovalParams();
+        } else if (approvalMode === "custom") {
           // config/read returns the effective global + project config for this
           // cwd. Reasserting those values is essential: simply omitting them
           // on a resumed thread would keep the previous named mode sticky.
@@ -1003,6 +1030,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // requested permission". Only the user's explicit OpenMausBot Full
         // mode may synthesize approvals; Custom must preserve the sandbox
         // boundary from config.toml (for example never + read-only).
+        // Keep the MCP auto-accept behavior consistent after the app-server
+        // is launched or resumed. Native shell/edit requests are denied by
+        // the coordination gate before this flag is consulted.
         autoAcceptPermissions = approvalMode === "full";
         // Each turn launches a new app-server. Reassert current bot instructions
         // on start AND resume so Codex owns their lifetime through compaction.
@@ -1181,6 +1211,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         browserMcp: true,
         images: true,
         nativeImageInput: true,
+        coordinationOnlyNativeTools: true,
         effortLevels: ["low", "medium", "high", "xhigh", "max"],
       },
       sendTurn,

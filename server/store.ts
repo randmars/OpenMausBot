@@ -554,6 +554,9 @@ export interface BotRecord {
    * delegate_bot). Off by default: a chief-of-staff-style bot is most
    * useful when it can coordinate without nagging. */
   approvePeerComms?: boolean;
+  /** Runtime organization role. Missing preserves legacy unrestricted role
+   * behavior; coordination roles are enforced by the turn gateway. */
+  orgRole?: string;
   /** Bot ids this bot is allowed to contact. Unset keeps the rule the app
    * shipped with — every visible bot in the same section — because that is
    * what every existing workspace already relies on. An explicit list wires
@@ -563,6 +566,8 @@ export interface BotRecord {
    * peer-roster.ts, for the roster, list_bots, ask_bot and delegate_bot
    * alike. */
   peers?: string[];
+  /** Explicit sender-owned edges that may cross section boundaries. */
+  crossSectionPeers?: string[];
   /** Whether this bot may use the workspace's connected apps (Composio).
    * Unset/true = allowed (the user configured the key deliberately);
    * false = this bot never receives the connection. Imported team members
@@ -1360,7 +1365,7 @@ export class Store {
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "orgRole" | "crossSectionPeers"
       >
     > = {},
     opts: {

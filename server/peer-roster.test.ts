@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   peerAllowed,
+  canReachPeer,
   peerName,
   peerRosterSystemPrompt,
   reachablePeers,
@@ -91,6 +92,14 @@ describe("reachablePeers", () => {
     expect(reachablePeers(fleet, { ...self, peers: ["hidden", "self", "writer"] }).map((bot) => bot.id)).toEqual([
       "writer",
     ]);
+  });
+
+  it("requires an explicit sender-owned edge for cross-section reachability", () => {
+    const crossSection = { ...self, crossSectionPeers: ["elsewhere"] };
+    expect(canReachPeer(crossSection, fleet[4]!)).toBe(true);
+    expect(reachablePeers(fleet, crossSection).map((bot) => bot.id)).toEqual(["writer", "coder", "elsewhere"]);
+    expect(canReachPeer(self, fleet[4]!)).toBe(false);
+    expect(reachablePeers(fleet, self).map((bot) => bot.id)).not.toContain("elsewhere");
   });
 });
 

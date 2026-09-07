@@ -21,6 +21,7 @@ import { GeminiAgentDriver } from "./gemini.ts";
 import { KimiAgentDriver } from "./kimi.ts";
 import { DroidAgentDriver } from "./droid.ts";
 import { CursorAgentDriver } from "./cursor.ts";
+import { HermesAgentDriver } from "./hermes.ts";
 import { removeTempDir } from "../../testing/cleanup.ts";
 
 const FAKE_CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "testing", "fake-acp-cli.ts");
@@ -625,6 +626,20 @@ describe("ACP turns (fake CLI)", () => {
     });
     const done = await recorder.until((e) => e.type === "turn.completed");
     expect(done).toMatchObject({ ok: true });
+  });
+
+  it("Hermes coordination-only turns fail closed and do not claim native enforcement", async () => {
+    await create(HermesAgentDriver, "permission");
+    expect(instance.adapter.capabilities.coordinationOnlyNativeTools).toBe(false);
+    await instance.adapter.sendTurn({
+      threadId: "t-hermes-coordination",
+      text: "coordinate",
+      approvalMode: "full",
+      coordinationOnly: true,
+    });
+    const done = await recorder.until((event) => event.type === "turn.completed");
+    expect(done).toMatchObject({ ok: true });
+    expect(recorder.events.some((event) => event.type === "request.opened")).toBe(false);
   });
 
   it("per-bot Ask surfaces permissions from a legacy full-auto instance", async () => {

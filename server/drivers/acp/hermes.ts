@@ -408,6 +408,11 @@ const support: AcpSupport = {
   },
   defaultCli: "hermes",
   nativeSource: "hermes.acp",
+  // Hermes' ACP child executes its own terminal/file tools in-process. The
+  // parent only sees an approval request when Hermes elects to emit one; its
+  // native tool path has no per-turn coordination-only gate. Report this as
+  // unsupported so org-policy fails closed and can route a leader to Codex.
+  coordinationOnlyNativeTools: false,
   loginNote: "Hermes CLI is not installed",
   install: {
     command: {

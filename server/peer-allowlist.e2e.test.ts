@@ -465,4 +465,46 @@ describe("peer allow-list", () => {
       }
     }
   }, 60_000);
+
+  it("requires and honors an explicit cross-section edge in the isolated server", async () => {
+    await hideSeededBot();
+    const asker = await createBot("Cross Asker", "asker");
+    const target = await createBot("Cross Target", "plain");
+
+    try {
+      expect((await api("PATCH", `/api/bots/${asker.id}`, { section: "Coordination" })).status).toBe(200);
+      expect((await api("PATCH", `/api/bots/${target.id}`, { section: "Projects" })).status).toBe(200);
+      await warmUp(asker.id);
+      const token = await mintCapability(asker.id, asker.threadId);
+
+      expect(await peerNames(asker.id, token)).toEqual([]);
+      expect((await api("PATCH", `/api/bots/${asker.id}`, { crossSectionPeers: [target.id] })).status).toBe(400);
+      expect((await api("PATCH", `/api/bots/${asker.id}`, { crossSectionPeers: [target.id], acknowledgePeerScope: true })).status).toBe(200);
+      expect(await peerNames(asker.id, token)).toEqual(["Cross Target"]);
+
+      const allowed = await api(
+        "POST",
+        "/api/internal/ask-bot",
+        { fromBotId: asker.id, toBotId: target.id, message: "Cross-section check" },
+        { authorization: `Bearer ${token}` },
+      );
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.error).toBeUndefined();
+      await expect.poll(() => botBusy(target.id)).toBe(false);
+
+      expect((await api("PATCH", `/api/bots/${asker.id}`, { crossSectionPeers: [] })).status).toBe(200);
+      const denied = await api(
+        "POST",
+        "/api/internal/ask-bot",
+        { fromBotId: asker.id, toBotId: target.id, message: "Should be denied" },
+        { authorization: `Bearer ${token}` },
+      );
+      expect(denied.status).toBe(403);
+    } finally {
+      for (const bot of [asker, target]) {
+        await api("POST", `/api/bots/${bot.id}/interrupt`, {}).catch(() => undefined);
+        await api("DELETE", `/api/bots/${bot.id}`).catch(() => undefined);
+      }
+    }
+  }, 50_000);
 });

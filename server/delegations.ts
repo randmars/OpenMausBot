@@ -19,7 +19,7 @@ import { getOrCreateChannel, mirrorExchange, type CommsBus } from "./comms-visib
 import { DATA_DIR } from "./config.ts";
 import { newId } from "./contracts.ts";
 import { requestPeerApproval, type ApprovalBus } from "./peer-approval.ts";
-import { peerAllowed } from "./peer-roster.ts";
+import { canReachPeer } from "./peer-roster.ts";
 import { sectionKey, type BotRecord, type GroupRecord, type Store } from "./store.ts";
 
 export interface DelegationItem {
@@ -610,13 +610,13 @@ function dropIfUnreachable(
   sourceThreadId: string,
   item: PendingDelegationItem,
 ): boolean {
+  if (canReachPeer(sender, target)) return false;
   const sectionsDiffer = sectionKey(sender.section) !== sectionKey(target.section);
-  if (!sectionsDiffer && peerAllowed(sender, target.id)) return false;
   const reason = sectionsDiffer
-    ? "bots now belong to different sections"
+    ? "bots now belong to different sections and are no longer connected by an explicit peer edge"
     : `@${target.name} is no longer an allowed peer`;
   const result = sectionsDiffer
-    ? `@${sender.name} and @${target.name} now belong to different sections`
+    ? `@${sender.name} and @${target.name} are in different sections and are no longer connected by an explicit peer edge`
     : `@${sender.name} is no longer allowed to contact @${target.name}`;
   recordDelegationReceipt({
     id: item.id,

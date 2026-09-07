@@ -14,7 +14,14 @@ import { homedir } from "node:os";
 
 import { stripWorkspaceCredentialEnv } from "../config.ts";
 import { computerProxyEnv } from "../container-computer.ts";
-import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
+import {
+  cleanupExitedCliTree,
+  describeSpawnFailure,
+  execCli,
+  killCliTree,
+  spawnCli,
+  trackCliTreeNow,
+} from "../procs.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
 import { isHarnessOwnedMcpEnvName } from "../mcp-registry.ts";
 
@@ -905,6 +912,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       // multibyte characters that straddle two reads and corrupts the text
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
+        trackCliTreeNow(child);
         if (abandoned || state.settled) return;
         buf += chunk;
         let nl;
@@ -937,6 +945,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
 
       let stderr = "";
       child.stderr.on("data", (c) => {
+        trackCliTreeNow(child);
         stderr += c;
         if (stderr.length > 8192) stderr = stderr.slice(-8192);
       });
@@ -946,6 +955,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         void settle(false, "spawn_error");
       });
       child.on("close", (code) => {
+        cleanupExitedCliTree(child);
         if (abandoned) return;
         if (!state.settled) {
           emit({

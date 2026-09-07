@@ -18,9 +18,162 @@ import {
   type ExecFileOptions,
   type SpawnOptions,
 } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { join } from "node:path";
 import { resolveCliSpawn, type ResolvedSpawn } from "./env-path.ts";
+
+export interface LinuxProcessIdentity {
+  pid: number;
+  ppid: number;
+  processGroup: number;
+  startTime: string;
+}
+
+interface TrackedLinuxProcess extends LinuxProcessIdentity {
+  depth: number;
+}
+
+interface LinuxCliTree {
+  leader: LinuxProcessIdentity;
+  descendants: Map<number, TrackedLinuxProcess>;
+  tracker?: NodeJS.Timeout;
+  cleanedAfterExit: boolean;
+  lastIoRefreshAt: number;
+}
+
+const linuxCliTrees = new WeakMap<ChildProcess, LinuxCliTree>();
+const LINUX_TREE_TRACK_MS = 100;
+const MAX_TRACKED_DESCENDANTS = 256;
+const MAX_TRACKED_DEPTH = 32;
+
+/** Parse the fields after /proc's parenthesized comm, which may contain spaces. */
+function readLinuxProcessIdentity(pid: number): LinuxProcessIdentity | null {
+  try {
+    const line = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = line.lastIndexOf(") ");
+    if (close < 0) return null;
+    const fields = line.slice(close + 2).trim().split(/\s+/);
+    const ppid = Number(fields[1]);
+    const processGroup = Number(fields[2]);
+    const startTime = fields[19];
+    if (!Number.isSafeInteger(ppid) || !Number.isSafeInteger(processGroup) || !startTime) return null;
+    return { pid, ppid, processGroup, startTime };
+  } catch {
+    return null;
+  }
+}
+
+function sameLinuxProcess(expected: LinuxProcessIdentity, current: LinuxProcessIdentity | null): boolean {
+  return Boolean(current && current.pid === expected.pid && current.startTime === expected.startTime);
+}
+
+function linuxChildren(pid: number): number[] {
+  try {
+    const children = new Set<number>();
+    // Children may be spawned by any thread, not only the thread-group
+    // leader. The kernel exposes a separate children list for each task.
+    for (const task of readdirSync(`/proc/${pid}/task`, { withFileTypes: true })) {
+      if (!task.isDirectory() || !/^\d+$/.test(task.name)) continue;
+      const values = readFileSync(`/proc/${pid}/task/${task.name}/children`, "utf8")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(Number)
+        .filter(Number.isSafeInteger);
+      for (const child of values) children.add(child);
+    }
+    return [...children];
+  } catch {
+    return [];
+  }
+}
+
+function refreshLinuxCliTree(tree: LinuxCliTree): void {
+  if (!sameLinuxProcess(tree.leader, readLinuxProcessIdentity(tree.leader.pid))) return;
+  for (const [pid, identity] of tree.descendants) {
+    if (!sameLinuxProcess(identity, readLinuxProcessIdentity(pid))) tree.descendants.delete(pid);
+  }
+  const queue: Array<{ identity: LinuxProcessIdentity; depth: number }> = [{ identity: tree.leader, depth: 0 }];
+  const seen = new Set<number>([tree.leader.pid]);
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    if (tree.descendants.size >= MAX_TRACKED_DESCENDANTS) break;
+    if (parent.depth >= MAX_TRACKED_DEPTH) continue;
+    for (const pid of linuxChildren(parent.identity.pid)) {
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      const identity = readLinuxProcessIdentity(pid);
+      if (!identity || identity.ppid !== parent.identity.pid) continue;
+      const tracked = { ...identity, depth: parent.depth + 1 };
+      tree.descendants.set(pid, tracked);
+      queue.push({ identity, depth: tracked.depth });
+      if (tree.descendants.size >= MAX_TRACKED_DESCENDANTS) break;
+    }
+  }
+}
+
+function registerLinuxCliTree(child: ChildProcess): void {
+  if (process.platform !== "linux" || !child.pid) return;
+  const leader = readLinuxProcessIdentity(child.pid);
+  if (!leader) return;
+  const tree: LinuxCliTree = {
+    leader,
+    descendants: new Map(),
+    cleanedAfterExit: false,
+    lastIoRefreshAt: 0,
+  };
+  refreshLinuxCliTree(tree);
+  tree.tracker = setInterval(() => refreshLinuxCliTree(tree), LINUX_TREE_TRACK_MS);
+  tree.tracker.unref?.();
+  linuxCliTrees.set(child, tree);
+  child.once("exit", () => cleanupExitedCliTree(child));
+}
+
+/** Refresh at a driver's existing I/O boundary, while the model is still live. */
+export function trackCliTreeNow(child: ChildProcess): void {
+  const tree = linuxCliTrees.get(child);
+  if (!tree) return;
+  const now = Date.now();
+  // Stream chunks can arrive much faster than the event loop can afford
+  // synchronous /proc traversal. Preserve the first I/O observation, then
+  // cap this path at 10 Hz per CLI; the independent tracker is also 10 Hz.
+  if (tree.lastIoRefreshAt !== 0 && now - tree.lastIoRefreshAt < LINUX_TREE_TRACK_MS) return;
+  tree.lastIoRefreshAt = now;
+  refreshLinuxCliTree(tree);
+}
+
+/** Signal a PID only while it still has the start identity captured as our descendant. */
+export function terminateTrackedLinuxProcess(
+  expected: LinuxProcessIdentity,
+  readIdentity: (pid: number) => LinuxProcessIdentity | null = readLinuxProcessIdentity,
+  signal: (pid: number) => void = (pid) => process.kill(pid, "SIGTERM"),
+): boolean {
+  if (!sameLinuxProcess(expected, readIdentity(expected.pid))) return false;
+  try {
+    signal(expected.pid);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalTrackedDescendants(tree: LinuxCliTree): void {
+  const deepestFirst = [...tree.descendants.values()].sort((a, b) => b.depth - a.depth);
+  for (const identity of deepestFirst) terminateTrackedLinuxProcess(identity);
+}
+
+/** Finish exact descendants after the model/group leader has already exited. */
+export function cleanupExitedCliTree(child: ChildProcess): void {
+  const tree = linuxCliTrees.get(child);
+  if (!tree || tree.cleanedAfterExit) return;
+  tree.cleanedAfterExit = true;
+  if (tree.tracker) clearInterval(tree.tracker);
+  // Never signal the numeric process group after its leader is gone: that
+  // identity can be reused. Only signal descendant PIDs whose start time is
+  // still the one captured while they belonged to this live CLI tree.
+  signalTrackedDescendants(tree);
+}
 
 export function resolveCli(cli: string, args: string[] = []): ResolvedSpawn {
   return resolveCliSpawn(cli, args);
@@ -66,6 +219,7 @@ export function spawnCli(
     // win32: taskkill /T does the reaping instead (see killCliTree)
     ...(process.platform === "win32" ? { windowsHide: true } : { detached: true }),
   }) as ChildProcessByStdio<Writable, Readable, Readable>; // callers always pipe all three
+  registerLinuxCliTree(child);
 
   // A write to a dying child's stdin fails differently per platform, and one
   // of the ways is fatal. On POSIX the kill is synchronous, the stream is
@@ -125,7 +279,19 @@ export function describeSpawnFailure(err: NodeJS.ErrnoException, cli: string): S
 /** Stop a CLI and every process it spawned (MCP proxies included). */
 export function killCliTree(child: ChildProcess, timeoutMs = 5_000): Promise<boolean> {
   const pid = child.pid;
-  if (!pid || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  if (!pid) return Promise.resolve(true);
+  if (child.exitCode !== null || child.signalCode !== null) {
+    cleanupExitedCliTree(child);
+    return Promise.resolve(true);
+  }
+
+  const linuxTree = linuxCliTrees.get(child);
+  if (linuxTree) {
+    refreshLinuxCliTree(linuxTree);
+    // Codex MCP launchers create their own process groups. Signal every exact
+    // descendant identity before stopping the model's group.
+    signalTrackedDescendants(linuxTree);
+  }
 
   return new Promise((resolve) => {
     let timer: NodeJS.Timeout;

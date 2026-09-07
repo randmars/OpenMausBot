@@ -16,7 +16,15 @@ import { join, dirname } from "node:path";
 
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
-import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
+import {
+  brokerSocketPath,
+  cleanupExitedCliTree,
+  describeSpawnFailure,
+  execCli,
+  killCliTree,
+  spawnCli,
+  trackCliTreeNow,
+} from "../procs.ts";
 
 import type {
   DriverCreateInput,
@@ -1137,6 +1145,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // multibyte characters that straddle two reads and corrupts the text
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
+        trackCliTreeNow(child);
         buf += chunk;
         let nl;
         while ((nl = buf.indexOf("\n")) !== -1) {
@@ -1147,6 +1156,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       });
 
       child.stderr.on("data", (c) => {
+        trackCliTreeNow(child);
         session.stderr += c;
         if (session.stderr.length > 8192) session.stderr = session.stderr.slice(-8192);
       });
@@ -1157,6 +1167,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       });
 
       child.on("close", (code) => {
+        cleanupExitedCliTree(child);
         // a turn still running when the process died is a failed turn; a
         // process that exited between turns (idle close, contract change)
         // is just a session ending
@@ -1352,6 +1363,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         });
         child.on("error", (error) => finish(error));
         child.on("close", (code) => {
+          cleanupExitedCliTree(child);
           if (code === 0) finish();
           else finish(new Error(stderr.trim() || `Claude review exited ${code}`));
         });

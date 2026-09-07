@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
-import { killCliTree, spawnCli } from "./procs.ts";
+import { killCliTree, spawnCli, trackCliTreeNow } from "./procs.ts";
 
 const IDLE = "setInterval(() => {}, 1000)";
 
@@ -74,4 +74,48 @@ describe("killCliTree", () => {
       }
     }
   }, 20_000);
+
+  it("reaps a separately grouped descendant after its model parent exits", async () => {
+    if (process.platform !== "linux") return;
+    const unrelated = spawn(process.execPath, ["-e", IDLE], { stdio: "ignore", detached: true });
+    const parent = spawnCli(
+      process.execPath,
+      [
+        "-e",
+        `const { spawn } = require("node:child_process");` +
+          `const c = spawn(process.execPath, ["-e", ${JSON.stringify(IDLE)}], { stdio: "ignore", detached: true });` +
+          `console.log(c.pid); process.stdin.resume(); process.stdin.on("end", () => process.exit(0));`,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    let descendant = 0;
+    try {
+      descendant = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("descendant did not report its pid")), 5_000);
+        parent.stdout.once("data", (chunk) => {
+          clearTimeout(timer);
+          trackCliTreeNow(parent);
+          resolve(Number(String(chunk).trim()));
+        });
+      });
+      expect(descendant).toBeGreaterThan(0);
+      expect(alive(descendant)).toBe(true);
+      expect(alive(unrelated.pid!)).toBe(true);
+
+      const closed = new Promise<void>((resolve) => parent.once("close", () => resolve()));
+      parent.stdin.end();
+      await closed;
+
+      const deadline = Date.now() + 5_000;
+      while (alive(descendant) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(alive(descendant)).toBe(false);
+      expect(alive(unrelated.pid!)).toBe(true);
+    } finally {
+      await killCliTree(parent);
+      if (descendant && alive(descendant)) process.kill(descendant, "SIGTERM");
+      if (unrelated.pid && alive(unrelated.pid)) process.kill(-unrelated.pid, "SIGTERM");
+    }
+  }, 15_000);
 });

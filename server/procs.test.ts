@@ -4,8 +4,26 @@ import {
   assertSafeCliArgv,
   describeSpawnFailure,
   estimatedWindowsCommandLineChars,
+  terminateTrackedLinuxProcess,
   WINDOWS_SAFE_COMMAND_LINE_CHARS,
 } from "./procs.ts";
+
+describe("Linux descendant identity", () => {
+  const captured = { pid: 42, ppid: 10, processGroup: 42, startTime: "1000" };
+
+  it("signals the same captured PID identity", () => {
+    const signalled: number[] = [];
+    expect(terminateTrackedLinuxProcess(captured, () => captured, (pid) => signalled.push(pid))).toBe(true);
+    expect(signalled).toEqual([42]);
+  });
+
+  it("does not signal a PID whose start time was reused", () => {
+    const signalled: number[] = [];
+    const reused = { ...captured, startTime: "2000" };
+    expect(terminateTrackedLinuxProcess(captured, () => reused, (pid) => signalled.push(pid))).toBe(false);
+    expect(signalled).toEqual([]);
+  });
+});
 
 describe("Windows CLI argument safety", () => {
   it("accepts ordinary launches", () => {

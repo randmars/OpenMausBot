@@ -659,6 +659,16 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.argv[seen.argv.indexOf("--disallowedTools") + 1]).toBe("Bash(git *),Edit");
   });
 
+  it("adds the coordination-only native coding deny list at dispatch", async () => {
+    await create();
+    const dump = join(scratch, "coordination-only.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    await instance.adapter.sendTurn({ threadId: "t-coordination-only", text: "coordinate", coordinationOnly: true });
+    await recorder.until((event) => event.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv[seen.argv.indexOf("--disallowedTools") + 1]).toBe("Bash,Edit,Write,NotebookEdit");
+  });
+
   it("passes an explicit empty available set to disable every Claude built-in", async () => {
     await create(undefined, {}, { tools: [], disallowedTools: [] });
     const dump = join(scratch, "no-builtins.json");

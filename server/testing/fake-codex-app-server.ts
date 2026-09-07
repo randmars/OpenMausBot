@@ -7,7 +7,7 @@
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
 //                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | config-profile |
 //                     config-profile-unsupported | config-read-error | image |
-//                     logged-in-stdout | logged-out | unauthorized | late-request
+//                     logged-in-stdout | logged-out | unauthorized | late-request | coordination-write
 //   FAKE_CODEX_DUMP   path to write {pid, argv, env, calls, decision} as JSON
 //
 // Keep this file dependency-free — it runs as a bare `node` subprocess.
@@ -322,8 +322,8 @@ process.stdin.on("data", (chunk) => {
               },
             },
           });
-        } else if (mode === "approval" || mode === "windows-command") {
-          const approvalCommand = mode === "windows-command" ? command : "rm -rf scratch";
+        } else if (mode === "approval" || mode === "windows-command" || mode === "coordination-write") {
+          const approvalCommand = mode === "windows-command" ? command : mode === "coordination-write" ? "touch forbidden.txt" : "rm -rf scratch";
           out({ jsonrpc: "2.0", id: 100, method: "execCommandApproval", params: { command: approvalCommand } });
           // turn continues from the approval response handler above
         } else {

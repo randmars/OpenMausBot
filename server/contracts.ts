@@ -183,6 +183,9 @@ export interface SendTurnInput {
   transcript?: Array<{ role: "user" | "assistant"; text: string }>;
   /** Bot persona (name/title/description) as a system prompt. */
   system?: string;
+  /** Server-enforced coordination role. Supported drivers deny native coding
+   * tools for this turn; unsupported drivers must be rejected before spawn. */
+  coordinationOnly?: boolean;
   /** Per-bot integrations the driver may hand to the agent as tools. */
   integrations?: {
     /** A local stdio bridge owns the remote Composio transport. Keeping the
@@ -244,6 +247,9 @@ export interface ProviderAdapter {
      * the harness only offers agents tooling (and prompts about it) to
      * drivers that can actually hand it to the agent. */
     agentsMcp?: boolean;
+    /** True only when this driver can actually deny its native coding tools
+     * for coordination-only roles. Unknown/false is fail-closed. */
+    coordinationOnlyNativeTools?: boolean;
     /** True when the driver mounts turn.integrations.computer (the box's
      * screenshot/click tools). Same rule as agentsMcp: a bot must never be
      * told it has a computer whose tools its driver cannot mount — it

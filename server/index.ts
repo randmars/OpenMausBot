@@ -28,6 +28,7 @@ import {
 } from "../shared/credential-request.ts";
 
 import { HELD_NOTE, approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
+import { knownViewerPorts, proxyViewerRequest, proxyViewerUpgrade } from "./computer-viewer-proxy.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -80,7 +81,9 @@ import {
 } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
-import { peerAllowed, peerName, peerRosterSystemPrompt, reachablePeers, roomPeerRosterSystemPrompt, roomRosterLine } from "./peer-roster.ts";
+import { canReachPeer, peerAllowed, peerName, peerRosterSystemPrompt, reachablePeers, roomPeerRosterSystemPrompt, roomRosterLine } from "./peer-roster.ts";
+import { canDispatchHive, coordinationNativeToolStatus, isCoordinationOnlyRole, organizationRoutingOverlay } from "./org-policy.ts";
+import { getHiveStatus, submitHiveAdmission, submitHiveAcceptance, type HiveAdmission } from "./hive-gateway.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
   containerComputerAction,
@@ -650,6 +653,7 @@ function agentsIntegration(
   depth: number,
   skillAuthoring: boolean,
   generation: string,
+  orgRole?: string,
 ) {
   const token = mintInternalCapability({
     botId,
@@ -671,6 +675,8 @@ function agentsIntegration(
       OMB_COMMS_TOKEN: token,
       OMB_TURN_DEPTH: String(depth),
       OMB_SKILL_AUTHORING_ENABLED: skillAuthoring ? "1" : "0",
+      OMB_ORG_ROLE: orgRole ?? "",
+      OMB_HIVE_TOOLS_ENABLED: canDispatchHive(orgRole) ? "1" : "0",
     },
   };
 }
@@ -1106,14 +1112,37 @@ const wireBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
   const visible = approvalGrant
     ? { ...rest, approvalMode: "ask" as const, autoApprove: false }
     : rest;
-  return { ...visible, avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
+  const nativeToolStatus = coordinationNativeToolStatus(
+    bot.orgRole,
+    registry.get(bot.modelSelection.instanceId)?.adapter.capabilities,
+  );
+  return {
+    ...visible,
+    avatarUrl: visible.avatarUrl ?? null,
+    orgRuntime: {
+      coordinationOnly: isCoordinationOnlyRole(bot.orgRole),
+      nativeToolRestriction: nativeToolStatus,
+    },
+    ...(tasks ? { tasks: tasks.map(wireTask) } : {}),
+  };
 };
 
 /** The correlated private response carries the requested value so Electron
  * can validate it before sending the confirmation that makes it effective. */
 const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
   const { resumeCursors: _resumeCursors, tasks, approvalGrant: _approvalGrant, lastProfileRequestId: _lastProfileRequestId, ...rest } = bot;
-  return { ...rest, avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
+  return {
+    ...rest,
+    avatarUrl: rest.avatarUrl ?? null,
+    orgRuntime: {
+      coordinationOnly: isCoordinationOnlyRole(bot.orgRole),
+      nativeToolRestriction: coordinationNativeToolStatus(
+        bot.orgRole,
+        registry.get(bot.modelSelection.instanceId)?.adapter.capabilities,
+      ),
+    },
+    ...(tasks ? { tasks: tasks.map(wireTask) } : {}),
+  };
 };
 
 /** A settings-based preview, not a receipt of a dispatched turn. No
@@ -1167,6 +1196,7 @@ function previewSystemPrompt(bot: BotRecord) {
     { id: "routine", label: "Routines", text: agentsMounted ? ROUTINE_PROMPT : "" },
     { id: "profile", label: "Profile changes", text: agentsMounted ? PROFILE_PROMPT : "" },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
+    { id: "org-routing", label: "Organization routing", text: organizationRoutingOverlay(bot.orgRole, bot.section) },
     { id: "memory", label: "Memory", text: privateWorkspace ? memorySystemPrompt(bot.id) : "" },
     { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
   ]);
@@ -3892,6 +3922,13 @@ async function startTurn(
       { status: 409 },
     );
   }
+  const nativeRoleStatus = coordinationNativeToolStatus(bot.orgRole, instance.adapter.capabilities);
+  if (nativeRoleStatus === "unsupported") {
+    throw Object.assign(
+      new Error(`coordination-only role "${bot.orgRole}" is unavailable on provider "${instance.driverKind}": native coding-tool restriction is unsupported`),
+      { status: 409 },
+    );
+  }
   // Resolve only transport tags from this newly submitted text. The original
   // string remains the durable message. Native-image providers get a
   // path-free prompt and bounded inputs instead of needing a Read tool;
@@ -4323,7 +4360,7 @@ async function startTurn(
       // that ask_bot and delegate_bot would then refuse.
       const sectionPeers = reachablePeers(store.bots, bot);
       if (agentsMounted) {
-        integrations.agents = agentsIntegration(bot.id, threadId, commsDepth, skillAuthoring, dispatchClaimId);
+        integrations.agents = agentsIntegration(bot.id, threadId, commsDepth, skillAuthoring, dispatchClaimId, bot.orgRole);
       }
       // @mentions in the user's message (the composer's tagging UI) become
       // an explicit coordination nudge. The agent still chooses the matching
@@ -4426,6 +4463,7 @@ async function startTurn(
         { id: "profile", label: "Profile changes", text: profilePrompt },
         { id: "learn", label: "Skill authoring", text: learnPrompt },
         { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
+        { id: "org-routing", label: "Organization routing", text: organizationRoutingOverlay(liveBot?.orgRole ?? bot.orgRole, liveBot?.section ?? bot.section) },
         { id: "memory", label: "Memory", text: privateWorkspace ? memorySystemPrompt(bot.id) : "" },
         { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
@@ -4446,6 +4484,7 @@ async function startTurn(
         resumeCursor,
         transcript,
         system: prompt.text,
+        coordinationOnly: isCoordinationOnlyRole(liveBot?.orgRole ?? bot.orgRole),
         integrations,
         cwd,
       }), () => !directTurnClaimExists(bot.id, dispatchClaimId, threadId), async () => {
@@ -5187,6 +5226,18 @@ async function runGroupMemberTurn(
     onDispatchError?.(message);
     return true;
   }
+  const nativeToolStatus = coordinationNativeToolStatus(bot.orgRole, instance.adapter.capabilities);
+  if (nativeToolStatus === "unsupported") {
+    const message = `${bot.name}'s coordination-only role is unavailable on provider "${bot.modelSelection.instanceId}": native coding-tool restriction is unsupported`;
+    store.appendMessage(threadId, {
+      role: "bot",
+      kind: "activity",
+      from: { botId: bot.id, name: bot.name, color: bot.color },
+      tool: { name: `error: ${message}`, ok: false },
+    });
+    onDispatchError?.(message);
+    return true;
+  }
   // One turn per bot at a time, across BOTH engines. Without this a bot
   // could run its 1:1 turn and a room turn concurrently — two provider
   // processes, interleaved token spend, and an interrupt that only ever
@@ -5227,7 +5278,7 @@ async function runGroupMemberTurn(
     !cardContinuation &&
     instance.adapter.capabilities.agentsMcp === true;
   if (hop < MAX_COMMS_DEPTH && instance.adapter.capabilities.agentsMcp === true) {
-    integrations.agents = agentsIntegration(bot.id, threadId, hop, skillAuthoring, internalGeneration);
+    integrations.agents = agentsIntegration(bot.id, threadId, hop, skillAuthoring, internalGeneration, bot.orgRole);
   }
   const latestUser = [...store.activePath(threadId)].reverse().find(
     (message) => message.role === "user" && message.kind === "text" && message.text,
@@ -5514,6 +5565,7 @@ async function runGroupMemberTurn(
     { id: "browser", label: "Browser", text: integrations.browser ? BUILT_IN_BROWSER_SYSTEM_PROMPT : "" },
     { id: "recall", label: "Recall", text: integrations.agents ? SESSION_SEARCH_SYSTEM_PROMPT : "" },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
+    { id: "org-routing", label: "Organization routing", text: organizationRoutingOverlay(bot.orgRole, bot.section) },
     // the room path has always put a newline before memory and trimmed
     // the block's leading space; keep that so existing prompts are
     // byte-identical
@@ -5618,6 +5670,7 @@ async function runGroupMemberTurn(
         system: roomSystem,
         cwd,
         integrations,
+        coordinationOnly: isCoordinationOnlyRole(readyBot.orgRole),
         ...memberTurnSelection(readyBot.modelSelection),
       }), () => abandoned || Boolean(isCancelled?.()), async () => {
         // Stop may have landed while the adapter was authenticating, before
@@ -6500,7 +6553,7 @@ function roomPostEligibility(
   }
   const outsider = group.memberIds
     .map((id) => store.bot(id))
-    .find((member) => member && sectionKey(member.section) !== sectionKey(bot.section));
+    .find((member) => member && member.id !== bot.id && !canReachPeer(bot, member));
   if (outsider) {
     return {
       ok: false,
@@ -7581,6 +7634,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (!gate.auth) return json(res, gate.status, { error: gate.error });
     const auth = gate.auth;
 
+    // ── computer viewer: proxy noVNC through this already-authenticated
+    // connection so it works over Tailscale/remote without its own tunnel
+    // (server/computer-viewer-proxy.ts; container stays loopback-only) ──
+    m = path.match(/^\/api\/computer-viewer\/(\d+)((?:\/.*)?)$/);
+    if (m) {
+      const viewerPort = Number(m[1]);
+      if (!knownViewerPorts.has(viewerPort)) return json(res, 404, { error: "unknown computer viewer" });
+      proxyViewerRequest(req, res, viewerPort, `${m[2] || "/vnc.html"}${url.search}`);
+      return;
+    }
+
     // ── sessions: who am I, tickets, pairing and revocation ─────────────
     if (method === "GET" && path === "/api/auth/session") {
       return json(
@@ -7736,6 +7800,40 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           throw Object.assign(new Error("the internal turn capability has expired"), { status: 401 });
         }
       };
+      if (method === "POST" && path === "/api/internal/hive-submit") {
+        const body = await readInternalBody();
+        requireActiveInternalCapability();
+        if (!canDispatchHive(internalSender.orgRole)) {
+          return json(res, 403, { error: "only an organization coordination role can submit hive work" });
+        }
+        const admission: HiveAdmission = {
+          sourceType: body.sourceType as HiveAdmission["sourceType"],
+          sourceId: String(body.sourceId ?? "").trim(),
+          ownerRole: String(internalSender.orgRole ?? "").trim(),
+          ownerBotId: internalSender.id,
+          harness: String(body.harness ?? "").trim(),
+        };
+        const result = await submitHiveAdmission(admission);
+        return json(res, result.ok ? 200 : result.status, result.ok ? { status: result.status, body: result.body } : { error: result.error });
+      }
+      if (method === "POST" && path === "/api/internal/hive-acceptance") {
+        const body = await readInternalBody();
+        requireActiveInternalCapability();
+        if (!canDispatchHive(internalSender.orgRole)) return json(res, 403, { error: "only coordination roles can validate hive work" });
+        if (body.ownerBotId !== undefined && body.ownerBotId !== internalSender.id) return json(res, 403, { error: "hive acceptance owner cannot be spoofed" });
+        const result = await submitHiveAcceptance({ queueId: String(body.queueId ?? ""), ownerBotId: internalSender.id,
+          generation: body.generation as number, runId: String(body.runId ?? ""), workerFence: String(body.workerFence ?? ""),
+          sourceRevision: String(body.sourceRevision ?? ""), receiptDigest: String(body.receiptDigest ?? ""),
+          accepted: body.accepted as boolean, summary: String(body.summary ?? "") });
+        return json(res, result.ok ? 200 : result.status, result.ok ? { status: result.status, body: result.body } : { error: result.error });
+      }
+      if (method === "GET" && path === "/api/internal/hive-status") {
+        requireActiveInternalCapability();
+        const sourceType = url.searchParams.get("sourceType") ?? "";
+        const sourceId = url.searchParams.get("sourceId") ?? "";
+        const result = await getHiveStatus(sourceType, sourceId);
+        return json(res, result.ok ? 200 : result.status, result.ok ? { status: result.status, body: result.body } : { error: result.error });
+      }
       if (method === "GET" && path === "/api/internal/agents") {
         const sender = internalSender;
         // title/description included so the caller can judge the team (who
@@ -8040,14 +8138,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // unresolvable id the cheapest way past the gate, so it is now a
         // hard refusal — every peer turn has an accountable sender.
         const from = internalSender;
-        if (sectionKey(from.section) !== sectionKey(target.section)) {
-          return json(res, 403, { error: "that bot belongs to a different section" });
-        }
         // The sender's allow-list, when it has one. Checked here rather than
         // trusted from the roster: the tool call carries a bot id, and an id
         // the model held from an earlier turn must not outlive the grant.
         if (!peerAllowed(from, target.id)) {
           return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+        }
+        if (!canReachPeer(from, target)) {
+          return json(res, 403, { error: "that bot belongs to a different section" });
         }
         const fromThreadId = internalCapability.threadId;
         // Rooms are conversations too. The task-only lookup here refused every
@@ -8107,11 +8205,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const freshFrom = store.bot(fromBotId);
           const freshTarget = store.bot(toBotId);
           if (!freshFrom || !freshTarget) return json(res, 404, { error: "no such bot" });
-          if (sectionKey(freshFrom.section) !== sectionKey(freshTarget.section)) {
-            return json(res, 200, { error: "that bot moved to a different section" });
-          }
           if (!peerAllowed(freshFrom, freshTarget.id)) {
             return json(res, 200, { error: "that bot is no longer an allowed peer" });
+          }
+          if (!canReachPeer(freshFrom, freshTarget)) {
+            return json(res, 200, { error: "that bot moved to a different section" });
           }
           // Membership can be revoked while the card is open: re-check the
           // same way, so a bot removed from a room mid-approval cannot go on
@@ -8246,11 +8344,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const from = internalSender;
         const target = store.bot(toBotId);
         if (!target) return json(res, 404, { error: "no such bot" });
-        if (sectionKey(from.section) !== sectionKey(target.section)) {
-          return json(res, 403, { error: "that bot belongs to a different section" });
-        }
         if (!peerAllowed(from, target.id)) {
           return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+        }
+        if (!canReachPeer(from, target)) {
+          return json(res, 403, { error: "that bot belongs to a different section" });
         }
         const fromThreadId = internalCapability.threadId;
         if (!connectorThread(from.id, fromThreadId)) {
@@ -8467,6 +8565,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             name,
             title: role,
             description: instructions,
+            orgRole: "worker",
             modelSelection: { ...chief.modelSelection },
             section: chief.section,
           },
@@ -10470,6 +10569,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         patch.approvePeerComms = body.approvePeerComms;
       }
+      if (body.orgRole !== undefined) {
+        if (body.orgRole === null || body.orgRole === "") patch.orgRole = undefined;
+        else if (typeof body.orgRole !== "string") return json(res, 400, { error: "orgRole must be a string or null" });
+        else {
+          const orgRole = body.orgRole.trim();
+          if (!orgRole || orgRole.length > 64 || !/^[a-z][a-z0-9-]*$/i.test(orgRole)) {
+            return json(res, 400, { error: "orgRole must be a short role label" });
+          }
+          patch.orgRole = orgRole;
+        }
+      }
       // Who this bot may contact. null clears the list back to "everyone
       // visible in my section"; an array — including an empty one — is the
       // explicit wiring, so a bot can be given exactly one correspondent.
@@ -10507,6 +10617,30 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         patch.peers = nextPeers;
       }
+      if (body.crossSectionPeers !== undefined) {
+        let nextCrossSectionPeers: string[] | undefined;
+        if (body.crossSectionPeers === null) nextCrossSectionPeers = undefined;
+        else if (
+          !Array.isArray(body.crossSectionPeers) ||
+          body.crossSectionPeers.some((peerId: unknown) => typeof peerId !== "string")
+        ) {
+          return json(res, 400, { error: "crossSectionPeers must be a list of bot ids, or null" });
+        } else {
+          nextCrossSectionPeers = [...new Set<string>(body.crossSectionPeers)].slice(0, MAX_WORKSPACE_BOTS);
+        }
+        // An absent persisted list is the empty explicit list for this
+        // cross-section-only field. Clearing an existing list narrows reach;
+        // adding any edge widens it and needs human acknowledgement.
+        const currentCrossSectionPeers = existingBot?.crossSectionPeers ?? [];
+        const widensCrossSectionReach =
+          (nextCrossSectionPeers ?? []).some((peerId) => !currentCrossSectionPeers.includes(peerId));
+        if (widensCrossSectionReach && body.acknowledgePeerScope !== true) {
+          return json(res, 400, {
+            error: "Widening cross-section peer edges requires confirming it first (acknowledgePeerScope)",
+          });
+        }
+        patch.crossSectionPeers = nextCrossSectionPeers;
+      }
       if (body.alwaysAllow !== undefined) {
         if (!Array.isArray(body.alwaysAllow) || body.alwaysAllow.some((t: unknown) => typeof t !== "string")) {
           return json(res, 400, { error: "alwaysAllow must be a list of tool keys" });
@@ -10534,6 +10668,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const nextPeers = patch.peers;
         if (nextPeers === undefined || (Array.isArray(nextPeers) && nextPeers.some((peerId) => !existingBot.peers!.includes(peerId)))) {
           loosened.push("peers");
+        }
+      }
+      if (body.crossSectionPeers !== undefined) {
+        const currentCrossSectionPeers = existingBot?.crossSectionPeers ?? [];
+        const nextCrossSectionPeers = patch.crossSectionPeers;
+        if (Array.isArray(nextCrossSectionPeers) && nextCrossSectionPeers.some((peerId) => !currentCrossSectionPeers.includes(peerId))) {
+          loosened.push("crossSectionPeers");
         }
       }
       if (body.approvePeerComms === false && existingBot?.approvePeerComms === true) loosened.push("approvePeerComms");
@@ -12907,6 +13048,30 @@ if (TUNNEL_SOCKET) {
     console.log(`openmausbot tunnel listener on ${TUNNEL_SOCKET}`);
   });
 }
+
+// noVNC's websocket half of the computer-viewer proxy above — Node never
+// emits 'request' for Upgrade requests once this listener exists, so the
+// same auth + known-port checks are re-run here directly against the socket.
+server.on("upgrade", (req, socket, head) => {
+  const reject = (status: number) => {
+    socket.write(`HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : "Not Found"}\r\nConnection: close\r\n\r\n`);
+    socket.destroy();
+  };
+  const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  const m = url.pathname.match(/^\/api\/computer-viewer\/(\d+)((?:\/.*)?)$/);
+  if (!m) return reject(404);
+  const gate = resolveRequestAuth(req, {
+    sessions,
+    cookieName: SESSION_COOKIE,
+    streamPath: "/api/events",
+    url,
+    loopbackMutationToken: desktopMutationToken,
+  });
+  if (!gate.auth) return reject(401);
+  const viewerPort = Number(m[1]);
+ if (!knownViewerPorts.has(viewerPort)) return reject(404);
+ proxyViewerUpgrade(req, socket, head, viewerPort, `${m[2] || "/"}${url.search}`);
+});
 
 const gracefulShutdown = createGracefulShutdown({
   cleanup: [

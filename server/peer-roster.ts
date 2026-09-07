@@ -12,6 +12,7 @@ export interface RosterMember {
   busy?: boolean;
   hidden?: boolean;
   section?: string;
+  crossSectionPeers?: string[];
   /** Bot ids this bot is allowed to contact. Unset keeps the original
    * rule — every visible bot in the same section — while an explicit list
    * narrows this bot to exactly those ids, and an empty list cuts it off
@@ -34,18 +35,30 @@ const sectionKey = (section?: string): string => section?.trim() || "";
 export const peerAllowed = (from: { peers?: string[] }, targetId: string): boolean =>
   !Array.isArray(from.peers) || from.peers.includes(targetId);
 
+/** One shared reachability decision for discovery and every execution edge.
+ * Legacy bots retain same-section behavior. A cross-section edge exists only
+ * when the sender explicitly opts that target in. */
+export function canReachPeer(
+  from: RosterMember,
+  target: Pick<RosterMember, "id" | "section">,
+): boolean {
+  const sameSection = sectionKey(from.section) === sectionKey(target.section);
+  if (sameSection) return peerAllowed(from, target.id);
+  return Array.isArray(from.crossSectionPeers)
+    && from.crossSectionPeers.includes(target.id)
+    && peerAllowed(from, target.id);
+}
+
 /** The peers a bot can both see and reach right now. The roster, list_bots
  * and @mention resolution all read this one list, so what a bot is TOLD
  * about its team can never be wider than what the comms endpoints will
  * actually let it do. */
 export function reachablePeers<T extends RosterMember>(bots: readonly T[], from: RosterMember): T[] {
-  const section = sectionKey(from.section);
   return bots.filter(
     (bot) =>
       bot.id !== from.id &&
       !bot.hidden &&
-      sectionKey(bot.section) === section &&
-      peerAllowed(from, bot.id),
+      canReachPeer(from, bot),
   );
 }
 

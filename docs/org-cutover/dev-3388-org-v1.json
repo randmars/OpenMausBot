@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "issue": "DEV-3388",
+  "description": "Full hive organization cutover. Apply only after live identity and model review.",
+  "runtimePolicy": {
+    "coordinationOnlyRoles": ["leader", "coordination", "domain-lead", "project-owner", "harness-steward"],
+    "routingOverlay": {
+      "source": "server/org-policy.ts:organizationRoutingOverlay",
+      "injectedAt": ["prompt-preview", "direct-turn", "room-turn"],
+      "preserves": ["soul", "transcript", "description", "workspace-instructions", "history"],
+      "enforcement": "context only; native driver and backend capability checks remain authoritative"
+    },
+    "nativeEnforcement": {
+      "codex": { "status": "verified", "source": "server/drivers/codex.ts", "mode": "read-only sandbox plus MCP peer/hive tools" },
+      "hermes": { "status": "unsupported", "source": "server/drivers/acp/hermes.ts", "inspectedVersion": "Hermes Agent v0.20.5", "reason": "Hermes native terminal/file actions have no per-turn coordination gate" }
+    },
+    "fallbackRoute": {
+      "instanceId": "codex",
+      "model": "gpt-5.6-luna",
+      "apply": false,
+      "requiresAuthorizedSmokeProof": true,
+      "preserveHistory": true,
+      "note": "Use only after an authorized isolated leader smoke proof; this manifest never changes modelSelection."
+    }
+  },
+  "bots": [
+    { "id": "8b11c59d-6056-49d7-a078-ae2abb37b6c9", "name": "Roi", "orgRole": "leader", "section": "Coordination", "crossSectionPeers": ["4a044f5c-1438-4bf9-afee-dee992e04f1f", "56f46556-85a1-464f-a4d6-1b072d1afede", "51522655-fb3b-4c28-869b-4684fecc26c0", "dee80ee6-a213-42c1-aadd-9df96173567f", "3ddf8848-c779-4260-94db-26ab3f2d7f9d", "047f5bb2-1905-4dd0-a658-d4439467fd3f", "edfdf81c-2ed0-4fe7-abd0-39b3975b5c95", "037b2679-6b84-41e7-b978-40615ab8aa48", "1b8f2ce6-7a9c-4898-adbf-2beb08d4dc3d", "2ba60e68-5bcd-43c2-90c3-0019ba0be70c", "acb0e30a-0c72-4d2d-985b-7239372a1503", "f0b29d15-4b26-4f7b-84d4-ee04f5674a7c", "28ce9730-d043-469c-8439-e6644c1a4633"] },
+    { "id": "6bb946ec-6252-4029-8efc-7fe2f9002e62", "name": "Missy", "orgRole": "leader", "section": "Coordination", "crossSectionPeers": ["4a044f5c-1438-4bf9-afee-dee992e04f1f", "56f46556-85a1-464f-a4d6-1b072d1afede", "51522655-fb3b-4c28-869b-4684fecc26c0", "dee80ee6-a213-42c1-aadd-9df96173567f", "3ddf8848-c779-4260-94db-26ab3f2d7f9d", "047f5bb2-1905-4dd0-a658-d4439467fd3f", "edfdf81c-2ed0-4fe7-abd0-39b3975b5c95", "037b2679-6b84-41e7-b978-40615ab8aa48", "1b8f2ce6-7a9c-4898-adbf-2beb08d4dc3d", "2ba60e68-5bcd-43c2-90c3-0019ba0be70c", "acb0e30a-0c72-4d2d-985b-7239372a1503", "f0b29d15-4b26-4f7b-84d4-ee04f5674a7c", "28ce9730-d043-469c-8439-e6644c1a4633"] },
+    { "id": "8c8ddcc2-aa51-4417-9d32-217db0b2bf9c", "name": "Lynn", "orgRole": "leader", "section": "Coordination", "crossSectionPeers": ["4a044f5c-1438-4bf9-afee-dee992e04f1f", "56f46556-85a1-464f-a4d6-1b072d1afede", "51522655-fb3b-4c28-869b-4684fecc26c0", "dee80ee6-a213-42c1-aadd-9df96173567f", "3ddf8848-c779-4260-94db-26ab3f2d7f9d", "047f5bb2-1905-4dd0-a658-d4439467fd3f", "edfdf81c-2ed0-4fe7-abd0-39b3975b5c95", "037b2679-6b84-41e7-b978-40615ab8aa48", "1b8f2ce6-7a9c-4898-adbf-2beb08d4dc3d", "2ba60e68-5bcd-43c2-90c3-0019ba0be70c", "acb0e30a-0c72-4d2d-985b-7239372a1503", "f0b29d15-4b26-4f7b-84d4-ee04f5674a7c", "28ce9730-d043-469c-8439-e6644c1a4633"] },
+    { "id": "4a044f5c-1438-4bf9-afee-dee992e04f1f", "name": "Foundation", "orgRole": "domain-lead", "section": "Domain Leads" },
+    { "id": "56f46556-85a1-464f-a4d6-1b072d1afede", "name": "Product", "orgRole": "domain-lead", "section": "Domain Leads" },
+    { "id": "51522655-fb3b-4c28-869b-4684fecc26c0", "name": "Personal", "orgRole": "domain-lead", "section": "Domain Leads" },
+    { "id": "dee80ee6-a213-42c1-aadd-9df96173567f", "name": "Bestmates", "orgRole": "domain-lead", "section": "Domain Leads" },
+    { "id": "3ddf8848-c779-4260-94db-26ab3f2d7f9d", "name": "Travel", "orgRole": "domain-lead", "section": "Domain Leads" },
+    { "id": "047f5bb2-1905-4dd0-a658-d4439467fd3f", "name": "RT", "aliases": ["Artie"], "orgRole": "project-owner", "section": "Projects" },
+    { "id": "edfdf81c-2ed0-4fe7-abd0-39b3975b5c95", "name": "Mitsui", "aliases": ["Sui"], "orgRole": "project-owner", "section": "Projects" },
+    { "id": "037b2679-6b84-41e7-b978-40615ab8aa48", "name": "Scuttlebutt", "orgRole": "project-owner", "section": "Projects" },
+    { "id": "1b8f2ce6-7a9c-4898-adbf-2beb08d4dc3d", "name": "Cotery", "orgRole": "project-owner", "section": "Projects" },
+    { "id": "2ba60e68-5bcd-43c2-90c3-0019ba0be70c", "name": "Codex", "aliases": ["CodexSupervisor"], "orgRole": "harness-steward", "section": "Harness Stewards" },
+    { "id": "acb0e30a-0c72-4d2d-985b-7239372a1503", "name": "Clod", "aliases": ["ClaudeSupervisor"], "orgRole": "harness-steward", "section": "Harness Stewards" },
+    { "id": "f0b29d15-4b26-4f7b-84d4-ee04f5674a7c", "name": "Grok", "aliases": ["GrokSupervisor"], "orgRole": "harness-steward", "section": "Harness Stewards" },
+    { "id": "28ce9730-d043-469c-8439-e6644c1a4633", "name": "Devin", "aliases": ["DevinSupervisor"], "orgRole": "harness-steward", "section": "Harness Stewards" }
+  ]
+}

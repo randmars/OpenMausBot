@@ -19,7 +19,7 @@ import { getOrCreateChannel, mirrorExchange, type CommsBus } from "./comms-visib
 import { DATA_DIR } from "./config.ts";
 import { newId } from "./contracts.ts";
 import { requestPeerApproval, type ApprovalBus } from "./peer-approval.ts";
-import { peerAllowed } from "./peer-roster.ts";
+import { canReachPeer } from "./peer-roster.ts";
 import { sectionKey, type BotRecord, type GroupRecord, type Store } from "./store.ts";
 
 export interface DelegationItem {
@@ -263,7 +263,7 @@ export function pendingDelegationSnapshot(): Array<{
 
 /** How many handoffs one turn may queue. Small on purpose: this is the only
  * thing standing between a confused bot and a fan-out of real turns. */
-const MAX_QUEUED_PER_THREAD = 4;
+const MAX_QUEUED_PER_THREAD = 8; // Per-turn handoff limit; hive execution capacity is enforced separately.
 
 /** Validate and enqueue a delegation. Pushes a "Delegated to @B: reason"
  * chip to the source thread so the user can see what was queued. */
@@ -610,13 +610,13 @@ function dropIfUnreachable(
   sourceThreadId: string,
   item: PendingDelegationItem,
 ): boolean {
+  if (canReachPeer(sender, target)) return false;
   const sectionsDiffer = sectionKey(sender.section) !== sectionKey(target.section);
-  if (!sectionsDiffer && peerAllowed(sender, target.id)) return false;
   const reason = sectionsDiffer
-    ? "bots now belong to different sections"
+    ? "bots now belong to different sections and are no longer connected by an explicit peer edge"
     : `@${target.name} is no longer an allowed peer`;
   const result = sectionsDiffer
-    ? `@${sender.name} and @${target.name} now belong to different sections`
+    ? `@${sender.name} and @${target.name} are in different sections and are no longer connected by an explicit peer edge`
     : `@${sender.name} is no longer allowed to contact @${target.name}`;
   recordDelegationReceipt({
     id: item.id,

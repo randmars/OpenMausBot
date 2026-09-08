@@ -4,7 +4,7 @@
 // a per-thread canonical NDJSON log (the debugging trick both upstream and
 // agentcal lean on), and delivered to subscribers (the SSE endpoint and
 // the server-side message folder).
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { EVENTS_DIR } from "../config.ts";
@@ -14,14 +14,23 @@ import { newId, type ProviderInstance, type RuntimeEvent, type RuntimeEventListe
 const INCOMPLETE_LOG_MESSAGE =
   "Canonical event history is incomplete: OpenMausBot could not write one or more events to disk. Live updates will continue.";
 
+function isEnoent(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "ENOENT";
+}
+
 export class EventBus {
   private listeners = new Set<RuntimeEventListener>();
   private unsubscribes: Array<() => void> = [];
   private pendingLogWarnings = new Map<string, RuntimeEvent>();
   private readonly appendLog: typeof appendFileSync;
+  private readonly mkdirEventsDir: () => void;
 
-  constructor(appendLog: typeof appendFileSync = appendFileSync) {
+  constructor(
+    appendLog: typeof appendFileSync = appendFileSync,
+    mkdirEventsDir: () => void = () => mkdirSync(EVENTS_DIR, { recursive: true, mode: 0o700 }),
+  ) {
     this.appendLog = appendLog;
+    this.mkdirEventsDir = mkdirEventsDir;
   }
 
   attach(instances: ProviderInstance[]) {
@@ -43,14 +52,16 @@ export class EventBus {
     const pendingWarning = this.pendingLogWarnings.get(event.threadId);
     const persistedEvents = pendingWarning ? [pendingWarning, redactSecrets(event)] : [redactSecrets(event)];
     try {
-      // the canonical log is a file people paste into bug reports; scrub
-      // credential-shaped content (tool titles, request summaries, reply
-      // text) the same way the native tee does
-      this.appendLog(
-        join(EVENTS_DIR, `${event.threadId}.ndjson`),
-        persistedEvents.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
-        { mode: 0o600 },
-      );
+      const payload = persistedEvents.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+      const path = join(EVENTS_DIR, `${event.threadId}.ndjson`);
+      const options = { mode: 0o600 };
+      try {
+        this.appendLog(path, payload, options);
+      } catch (error) {
+        if (!isEnoent(error)) throw error;
+        this.mkdirEventsDir();
+        this.appendLog(path, payload, options);
+      }
       if (pendingWarning) this.pendingLogWarnings.delete(event.threadId);
     } catch (error) {
       // Never feed this warning back through publish(): that would retry the

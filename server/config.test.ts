@@ -1,9 +1,23 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { customMcpServers,
+import type { AppConfig } from "./config.ts";
+
+// DATA_DIR reads OMB_DATA_DIR at import time (same pattern as
+// checkpoints.test.ts / attachments.test.ts) — the env var must be set
+// before config.ts is evaluated, or DATA_DIR silently resolves to the REAL
+// ~/.openmausbot and every rmSync/saveConfig below runs against Rand's live
+// config.json. This is the exact mechanism that wiped it 2026-09-09: this
+// file used a static top-level import with no isolation, so any bare test
+// run of this suite (no OMB_DATA_DIR already exported) deleted and
+// overwrote the real file. Root-caused 2026-09-11, rig.
+process.env.OMB_DATA_DIR = mkdtempSync(join(tmpdir(), "omb-config-test-"));
+
+const {
+  customMcpServers,
   DATA_DIR,
   instanceConfigs,
   isValidSshAlias,
@@ -27,8 +41,7 @@ import { customMcpServers,
   vpsSshAlias,
   withInstanceCli,
   WORKSPACE_CREDENTIAL_ENV,
-  type AppConfig,
-} from "./config.ts";
+} = await import("./config.ts");
 
 describe("configuration boundaries", () => {
   it("keeps supported stored settings and drops unrelated top-level data", () => {

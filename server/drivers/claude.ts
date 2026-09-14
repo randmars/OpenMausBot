@@ -807,14 +807,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         };
         allowed.push("mcp__dweb");
       }
-      // user-configured servers mount like any integration but are NOT
-      // pre-allowed: acceptEdits silently denies unlisted tools, which
-      // routes every custom tool call through the ogb permission broker
-      // into an Allow/Deny card. Reserved names were filtered upstream;
-      // skip any residual collision instead of clobbering a built-in.
+      // User-configured servers mount normally. The exact internal Decision Feed
+      // wrapper is the only custom server pre-allowed, so safe card readback does
+      // not prompt while every other custom tool still uses the OGB broker.
+      // Reserved names were filtered upstream; skip any residual collision.
+      // The wrapper cannot answer, dismiss, mint capabilities, or execute.
       for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
+        const decisionFeedTrusted = name === "decisionfeed" && /(?:^|[\/])decision-feed\.sh$/.test(server.command);
         if (name in mcpServers) continue;
         mcpServers[name] = { ...server };
+        if (decisionFeedTrusted) allowed.push("mcp__decisionfeed");
       }
       // Keep ask_user available even in Full access. Native bypass skips
       // permission prompts, not questions requiring a person's answer.

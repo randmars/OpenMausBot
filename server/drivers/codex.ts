@@ -437,6 +437,10 @@ export function codexNativeIncomingLogMessage(
   return message;
 }
 
+function isTrustedDecisionFeedServer(name: string, command: string): boolean {
+  return name === "decisionfeed" && /(?:^|[\/])decision-feed\.sh$/.test(command);
+}
+
 function mountMcpServer(
   appServerArgs: string[],
   env: Record<string, string | undefined>,
@@ -583,7 +587,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           mountMcpServer(appServerArgs, env, "browser", turn.integrations.browser);
         }
         for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
-          mountMcpServer(appServerArgs, env, name, server, false);
+          mountMcpServer(appServerArgs, env, name, server, isTrustedDecisionFeedServer(name, server.command));
         }
         if (turn.integrations?.phone) {
           const bridge = turn.integrations.phone;

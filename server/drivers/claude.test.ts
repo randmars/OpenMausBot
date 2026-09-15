@@ -972,6 +972,90 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(dump.argv).toContain("claude-other");
   });
 
+  it("waits for a delayed old-process close before spawning a changed-contract replacement", async () => {
+    const delayedCli = join(scratch, "delayed-close-claude.mjs");
+    const lifecycleLog = join(scratch, "handoff.log");
+    const closeGate = join(scratch, "allow-close");
+    writeFileSync(delayedCli, `#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
+
+const argv = process.argv.slice(2);
+const after = (flag) => {
+  const index = argv.indexOf(flag);
+  return index === -1 ? null : (argv[index + 1] ?? null);
+};
+const sessionId = after("--resume") ?? after("--session-id") ?? "fake-session";
+const model = after("--model") ?? "claude-fake";
+const lifecycleLog = process.env.FAKE_CLAUDE_HANDOFF_LOG;
+const closeGate = process.env.FAKE_CLAUDE_CLOSE_GATE;
+const record = (event) => writeFileSync(lifecycleLog, event + " " + process.pid + "\\n", { flag: "a" });
+const out = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+
+record("spawn");
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) !== -1) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (!line.trim()) continue;
+    out({ type: "system", subtype: "init", session_id: sessionId, model });
+    out({ type: "assistant", message: { content: [{ type: "text", text: "done" }] } });
+    out({ type: "result", is_error: false, stop_reason: "end_turn" });
+  }
+});
+process.stdin.on("end", () => {
+  record("eof");
+  const wait = setInterval(() => {
+    if (!closeGate || !existsSync(closeGate)) return;
+    clearInterval(wait);
+    record("close");
+    process.exit(0);
+  }, 10);
+});
+`);
+    chmodSync(delayedCli, 0o755);
+    await create(
+      undefined,
+      { FAKE_CLAUDE_HANDOFF_LOG: lifecycleLog, FAKE_CLAUDE_CLOSE_GATE: closeGate },
+      { cli: delayedCli },
+    );
+
+    await instance.adapter.sendTurn({ threadId: "t-serialized-switch", text: "one" });
+    await recorder.until((event) => event.type === "turn.completed");
+    const announced = (recorder.events.find((event) => event.type === "session.started") as { sessionId: string }).sessionId;
+
+    let replacementStarted = false;
+    const replacementPromise = instance.adapter.sendTurn({
+      threadId: "t-serialized-switch",
+      text: "two",
+      model: "claude-other",
+      resumeCursor: announced,
+    }).then((turn) => {
+      replacementStarted = true;
+      return turn;
+    });
+
+    await expect.poll(() => readFileSync(lifecycleLog, "utf8")).toContain("eof ");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const beforeRelease = readFileSync(lifecycleLog, "utf8").trim().split("\n");
+    expect(beforeRelease.filter((line) => line.startsWith("spawn "))).toHaveLength(1);
+    expect(replacementStarted).toBe(false);
+
+    writeFileSync(closeGate, "close");
+    const replacement = await replacementPromise;
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === replacement.turnId);
+
+    const lifecycle = readFileSync(lifecycleLog, "utf8").trim().split("\n");
+    const oldPid = lifecycle.find((line) => line.startsWith("spawn "))!.split(" ")[1];
+    const oldClose = lifecycle.indexOf(`close ${oldPid}`);
+    const replacementSpawn = lifecycle.findIndex((line, index) => index > 0 && line.startsWith("spawn "));
+    expect(oldClose).toBeGreaterThan(-1);
+    expect(replacementSpawn).toBeGreaterThan(oldClose);
+  });
+
   it("closes an idle session after the configured window", async () => {
     process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS = "10";
     process.env.OMB_CLAUDE_SESSION_IDLE_MS = "50";

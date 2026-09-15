@@ -618,6 +618,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       turn: { turnId: string; settled: boolean; sawStreamDelta: boolean } | null;
       idleTimer: ReturnType<typeof setTimeout> | null;
       closing: boolean;
+      /** Resolves only after the child closes, or false at the hard limit. */
+      closePromise: Promise<boolean> | null;
       stderr: string;
     }
     const sessions = new Map<string, Session>();
@@ -627,9 +629,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       : 10_000;
     const SESSION_IDLE_MS = Math.max(sessionIdleMinimum, Number(process.env.OMB_CLAUDE_SESSION_IDLE_MS) || 10 * 60_000);
 
-    const closeSession = (threadId: string, why: string) => {
+    const closeSession = (threadId: string, why: string): Promise<boolean> => {
       const s = sessions.get(threadId);
-      if (!s || s.closing) return;
+      if (!s) return Promise.resolve(true);
+      if (s.closePromise) return s.closePromise;
       s.closing = true;
       if (s.idleTimer) clearTimeout(s.idleTimer);
       // Broker ownership belongs to this session. Detach and close it now,
@@ -639,14 +642,35 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       s.broker = undefined;
       broker?.close();
       appendNative(threadId, { dir: "out", source: "claude.session", msg: { close: why } });
-      // stdin EOF is the CLI's exit signal; give it a moment, then insist
-      try {
-        s.child.stdin.end();
-      } catch {}
-      const kill = setTimeout(() => {
-        if (s.child.exitCode === null) killCliTree(s.child);
-      }, 5_000);
-      kill.unref?.();
+      s.closePromise = new Promise<boolean>((resolve) => {
+        let settled = false;
+        let forceTimer: ReturnType<typeof setTimeout>;
+        let deadlineTimer: ReturnType<typeof setTimeout>;
+        const finish = (closed: boolean) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(forceTimer);
+          clearTimeout(deadlineTimer);
+          s.child.off("close", onClose);
+          resolve(closed);
+        };
+        const onClose = () => finish(true);
+        s.child.once("close", onClose);
+
+        // stdin EOF is the CLI's normal exit signal. After the existing five
+        // second grace period, force the tree down. The second five seconds
+        // bounds killCliTree's own close wait; expiry refuses the replacement.
+        forceTimer = setTimeout(() => {
+          if (s.child.exitCode === null) void killCliTree(s.child);
+        }, 5_000);
+        deadlineTimer = setTimeout(() => finish(false), 10_000);
+        forceTimer.unref?.();
+        deadlineTimer.unref?.();
+        try {
+          s.child.stdin.end();
+        } catch {}
+      });
+      return s.closePromise;
     };
     const armIdle = (threadId: string) => {
       const s = sessions.get(threadId);
@@ -892,7 +916,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         return { turnId };
       }
-      if (live) closeSession(threadId, "spawn contract changed");
+      const retired = live ? closeSession(threadId, "spawn contract changed") : Promise.resolve(true);
 
       // Until sessions.set() below, this turn owns every launch resource.
       // Any bind, private-config or synchronous spawn failure must release
@@ -912,6 +936,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         retryState.delete(threadId);
       };
+
+      // Claude owns its native JSONL leaf until the old process has fully
+      // closed. Starting --resume before that close lets the next user
+      // message race onto the stale leaf when multiple branches are active.
+      if (!(await retired)) {
+        cleanupUnownedLaunch();
+        throw new Error("claude session did not close before replacement timeout");
+      }
 
       try {
         // Create the prompt file only for a new process. A compatible live
@@ -1003,6 +1035,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         turn: { turnId, settled: false, sawStreamDelta: false },
         idleTimer: null,
         closing: false,
+        closePromise: null,
         stderr: "",
       };
       sessions.set(threadId, session);
